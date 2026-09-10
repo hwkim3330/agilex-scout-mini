@@ -122,6 +122,8 @@ The router they were written for is
 
 - [`doc/CAN.md`](doc/CAN.md) — the CAN protocol, the IDs, and the full record of what
   was tried and ruled out
+- [`doc/RUNBOOK.md`](doc/RUNBOOK.md) — the bench procedure, one page, with the
+  decision at each step, and an honest note at the top about how it went
 - [`doc/SCOUT-FIRMWARE.md`](doc/SCOUT-FIRMWARE.md) — firmware and serial-number
   findings
 

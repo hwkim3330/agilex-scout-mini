@@ -1,0 +1,95 @@
+# Runs the vehicle-side suites on every push.
+#
+# None of this needs the vehicle. The AgileX decoder runs against hand-built
+# frames, the CAN bridge against a virtual CAN interface, and agx-cmd's safety
+# properties against a running daemon. They are what stands in for a chassis
+# that is not on the bench, and given that this code can move a vehicle, the
+# safety properties in particular are asserted rather than reviewed.
+name: tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      # vcan is not in the runner's default kernel package. Try to get it; if it
+      # cannot be had, the CAN suite is skipped rather than silently passing or
+      # failing the whole run over an environment gap.
+      - name: vcan for the CAN bridge tests
+        id: vcan
+        run: |
+          if ! sudo modprobe vcan 2>/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq "linux-modules-extra-$(uname -r)" || true
+            sudo modprobe vcan 2>/dev/null || true
+          fi
+          if sudo ip link add dev vcan0 type vcan 2>/dev/null; then
+            sudo ip link set up vcan0
+            ip -br link show type vcan
+            echo "available=yes" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::vcan unavailable on this runner; the CAN bridge suite is skipped"
+            echo "available=no" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Always compiled, even when it cannot be run: a compile break is the
+      # regression most likely to slip through otherwise. agilex.c has to be on
+      # the command line - can-bridge.c calls agx_decode() and agx_variant(), so
+      # compiling it alone fails at link, which is how this step spent its whole
+      # life red instead of guarding anything.
+      - name: can-bridge (compile)
+        working-directory: can-bridge/test
+        run: |
+          cc -O2 -Wall -Wextra -Werror -o can-bridge \
+            ../src/can-bridge.c ../src/agilex.c
+
+      # No vcan needed: pure decode against hand-built frames, so it is the one
+      # CAN check that runs everywhere. It guards the two mistakes the protocol
+      # invites - reading the big-endian payload little-endian, and confusing
+      # 0x221 (motion state) with 0x251 (first actuator).
+      - name: agilex protocol decode
+        working-directory: can-bridge/test
+        run: |
+          cc -O2 -Wall -Wextra -Werror -o test_agilex \
+            test_agilex.c ../src/agilex.c
+          ./test_agilex
+
+      - name: can-bridge (run)
+        if: steps.vcan.outputs.available == 'yes'
+        working-directory: can-bridge/test
+        run: CAN_BRIDGE_BIN=./can-bridge python3 test_bridge.py
+
+      # The only code here that can move a vehicle, so its safety properties are
+      # asserted against a running daemon rather than reviewed: silence while
+      # disarmed, full stick meaning the configured limit and not more, a step
+      # input ramped, the deadman ending in a stop and then silence, and exit
+      # putting a zero on the wire.
+      - name: agx-cmd safety properties
+        working-directory: agx-cmd/test
+        run: |
+          cc -O2 -Wall -Wextra -Werror -I../../can-bridge/src -o agx-cmd \
+            ../src/agx-cmd.c ../../can-bridge/src/agilex.c
+          AGX_CMD_BIN=./agx-cmd python3 test_agx_cmd.py
+
+      - name: agx-cmd protocol
+        working-directory: agx-cmd/test
+        run: python3 test_protocol.py
+
+      - name: the host tools at least parse
+        run: python3 -m compileall -q tools/
+
+      - name: shell syntax of everything shipped
+        run: |
+          fail=0
+          for f in $(find . -path ./.git -prune -o -type f \( -name '*.init' \
+                     -o -name '*.hotplug' -o -name 'can-up' \) -print); do
+            sh -n "$f" || { echo "FAIL $f"; fail=1; }
+          done
+          exit $fail
